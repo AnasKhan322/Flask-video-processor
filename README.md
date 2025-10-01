@@ -33,5 +33,9 @@ A web-based application for uploading, processing, and enhancing videos with cus
 ### Video Upload & Filters  
 ![Upload & Filters](screenshots/upload_filters.png)  
 
+### Original Video Preview  
+![Original Video](screenshots/original_video.png)  
+
 ### Processed Video Preview  
 ![Processed Video](screenshots/processed_video.png)  
+
