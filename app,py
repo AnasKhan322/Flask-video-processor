@@ -1,0 +1,192 @@
+import os
+import json
+from flask import Flask, request, jsonify, send_file, render_template
+from werkzeug.utils import secure_filename
+from scipy.io import wavfile
+import numpy as np
+import subprocess
+
+from filters import pre_emphasis, butter_bandpass
+from video_effects import apply_greyscale, apply_color_invert
+
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+app = Flask(__name__, template_folder='templates')
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+
+state = {
+    "video_uploaded": False,
+    "filters_configured": False,
+    "filters_applied": False,
+    "video_path": None,
+    "processed_path": None,
+    "filter_config": None
+}
+def extract_audio_from_video(video_path, audio_out_path):
+    cmd = [
+        'ffmpeg', '-y', '-i', video_path,
+        '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1', audio_out_path
+    ]
+    subprocess.run(cmd, check=True)
+
+def combine_audio_video(video_path, audio_path, output_path):
+    cmd = [
+        'ffmpeg', '-y', '-i', video_path, '-i', audio_path,
+        '-c:v', 'copy', '-c:a', 'aac', '-strict', 'experimental',
+        '-map', '0:v:0', '-map', '1:a:0', output_path
+    ]
+    subprocess.run(cmd, check=True)
+
+def process_audio_wav(audio_in_path, audio_out_path, filter_type='pre_emphasis', alpha= 0.97,lowcut=800, highcut=6000,fs=44100, order=4):
+    fs, audio = wavfile.read(audio_in_path)
+    # Ensure audio is float for processing (and mono)
+    audio = audio.astype(np.float32)
+    if filter_type == 'pre_emphasis':
+        audio_out = pre_emphasis(audio, alpha=alpha)
+    elif filter_type == 'bandpass':
+        audio_out = butter_bandpass(
+            audio,
+            lowcut=lowcut,
+            highcut=highcut,
+            fs=fs,
+            order=order
+        )
+    else:
+        raise ValueError("Unsupported filter")
+    # Convert back to int16 for wav saving
+    audio_out = np.clip(audio_out, -32768, 32767).astype(np.int16)
+    wavfile.write(audio_out_path, fs, audio_out)  
+
+@app.route('/')
+def index():
+    return render_template('index.html')    
+
+@app.route('/upload', methods=['POST'])
+def upload_video():
+    if state["video_uploaded"]:
+        return jsonify({"error": "Video already uploaded"}), 400
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    if file:
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        state["video_uploaded"] = True
+        state["video_path"] = filepath
+        state["filters_applied"] = False
+        return jsonify({"message": "Video uploaded"}), 200
+    return jsonify({"error": "Invalid file type"}), 400
+
+@app.route('/delete', methods=['DELETE'])
+def delete_video():
+    if not state["video_uploaded"]:
+        return jsonify({"error": "No video to delete"}), 400
+    try:
+        os.remove(state["video_path"])
+    except Exception: pass
+    if state.get("processed_path"):
+        try: os.remove(state["processed_path"])
+        except Exception: pass
+    state.update({
+        "video_uploaded": False,
+        "filters_configured": False,
+        "filters_applied": False,
+        "video_path": None,
+        "processed_path": None,
+        "filter_config": None
+    })
+    return jsonify({"message": "Deleted"}), 200
+
+
+@app.route('/configure_filters', methods=['POST'])
+def configure_filters():
+    if not state["video_uploaded"]:
+        return jsonify({"error": "No video uploaded"}), 400
+    config = request.json
+    # Validate: Only allow implemented filters
+    allowed_video = ["grayscale", "colorinvert"]
+    allowed_audio = ["voice_enhancement"]
+    for f in config.get("filters", []):
+        if f["type"] == "video" and f["name"] not in allowed_video:
+            return jsonify({"error": f"Video filter not implemented: {f['name']}"}), 400
+        if f["type"] == "audio" and f["name"] not in allowed_audio:
+            return jsonify({"error": f"Audio filter not implemented: {f['name']}"}), 400
+
+    state["filter_config"] = config
+    state["filters_configured"] = True
+    # Optionally, save config to disk:
+    with open(os.path.join(UPLOAD_FOLDER, "filter_config.json"), "w") as f:
+        json.dump(config, f)
+    return jsonify({"message": "Filters configured"}), 200
+
+import uuid
+
+@app.route('/apply_filters', methods=['POST'])
+def apply_filters():
+    run_id = uuid.uuid4().hex
+    if not (state["video_uploaded"] and state["filters_configured"]):
+        return jsonify({"error": "Missing video or filter config"}), 400
+    in_path = state["video_path"]
+    out_path = os.path.join(app.config['UPLOAD_FOLDER'], "processed.mp4")
+    temp_audio = os.path.join(app.config['UPLOAD_FOLDER'], "audio_temp.wav")
+    processed_audio = os.path.join(app.config['UPLOAD_FOLDER'], "audio_processed.wav")
+    config = state["filter_config"]
+    current_video = in_path
+   
+    # Step 1: Apply video filters (if any)
+    for f in config.get("filters", []):
+        if f["type"] == "video":
+            if f["name"] == "grayscale":
+                apply_greyscale(current_video, out_path)   
+            elif f["name"] == "colorinvert":
+                apply_color_invert(current_video, out_path)
+            current_video = out_path
+
+    # Step 2: Apply audio filters (if any)
+    
+    audio_filter_applied = False
+    for f in config.get("filters", []):
+        if f["type"] == "audio" and f["name"] == "voice_enhancement":
+            audio_filter_applied = True
+            extract_audio_from_video(current_video, temp_audio)
+            alpha = float(f.get("alpha", 0.97))
+            lowcut = float(f.get("lowcut", 800))
+            highcut = float(f.get("highcut", 6000))
+            order = int(f.get("order", 4))
+            # Read the audio
+            fs, audio = wavfile.read(temp_audio)
+            audio = audio.astype(np.float32)
+            # Step 1: Pre-emphasis
+            audio = pre_emphasis(audio, alpha=alpha)
+            # Step 2: Bandpass
+            audio = butter_bandpass(audio, lowcut=lowcut, highcut=highcut, fs=fs, order=order)
+            # Save to wav
+            audio_out = np.clip(audio, -32768, 32767).astype(np.int16)
+            wavfile.write(processed_audio, fs, audio_out)
+            # Combine with video
+            final_output = os.path.join(app.config['UPLOAD_FOLDER'], "processed_final_{run_id}.mp4")
+            combine_audio_video(current_video, processed_audio, final_output)
+            current_video = final_output    
+
+    if not audio_filter_applied:
+        state["processed_path"] = current_video
+    else:
+        state["processed_path"] = final_output
+
+    state["filters_applied"] = True
+    return jsonify({"message": "Filters applied", "video_url": f"/stream/{run_id}"}), 200
+
+@app.route('/stream/<run_id>', methods=['GET'])
+def stream(run_id):
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"processed_{run_id}.mp4")
+    if not state["filters_applied"]:
+        return jsonify({"error": "No filtered video"}), 400
+    return send_file(state["processed_path"], mimetype='video/mp4')
+
+if __name__ == "__main__":
+    app.run(debug=True)
