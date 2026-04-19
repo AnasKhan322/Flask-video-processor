@@ -29,17 +29,17 @@ A web-based application for uploading, processing, and enhancing videos with cus
 
 ### Main Interface  
 <p align="center">
-  <img src="./screenshots/interface.png" width = "200" />
+  <img src="./screenshots/interface.png" width = "700" />
 </p>
 
 ### Video Upload & Filters  
 <p align = "center">
-  <img src="./screenshots/upload_filters.png" width = "200" />
+  <img src="./screenshots/upload_filters.png" width = "45%" />
 </p>  
 
 ### Original Video Preview  
 <p align = "center">
-  <img src="./screenshots/original_video.png" width = "200" />
+  <img src="./screenshots/original_video.png" width = "45%" />
 </p>  
 
 ### Processed Video Preview  
